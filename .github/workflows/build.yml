@@ -1,0 +1,52 @@
+name: Build and Release Android .so
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK and build tools
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "ndk;27.2.12479018" "cmake;3.22.1" "platform-tools"
+
+      - name: Install Ninja
+        shell: bash
+        run: sudo apt update && sudo apt install -y ninja-build
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/27.2.12479018/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-26
+
+      - name: Build
+        shell: bash
+        run: cmake --build build --config Release --verbose
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest # 'latest'라는 태그 이름으로 릴리스/업로드
+          body: "자동 빌드된 libForceClientRP.so 파일입니다."
+          files: build/libForceClientRP.so
+          make_latest: true
