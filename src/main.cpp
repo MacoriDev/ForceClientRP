@@ -76,10 +76,27 @@ constexpr PatchSpec kPatches_26_23[] = {
      kStackRequiredFlagStoreForcedFalse_26_23},
 };
 
+
+// Minecraft Bedrock Android 26.30 ARM64, build-id 2dd6f453b4cfadea91a35e498a1055601a22850a.
+// ResourcePacksInfoPacket::_read required/must-accept flag store.
+//   strb w8,  [x28, #0x30] -> strb wzr, [x28, #0x30]
+constexpr int kInfoRequiredFlagPattern_26_30[] = {
+    0xA8, 0x03, 0x54, 0x38,
+    0xE8, 0xC3, 0x29, 0x39,
+    0xA8, 0x17, 0x00, 0x34,
+    0xA8, 0x03, 0x50, 0x38,
+    0xE8, 0xC3, 0x28, 0x39,
+    0x88, 0xC3, 0x00, 0x39,
+    0xA8, 0x03, 0x04, 0xD1,
+    0xE0, 0x03, 0x14, 0xAA,
+};
+constexpr size_t kInfoRequiredFlagStoreOffset_26_30 = 20;
+constexpr uint32_t kInfoRequiredFlagStoreOriginal_26_30 = 0x3900C388u;
+constexpr uint32_t kInfoRequiredFlagStoreForcedFalse_26_30 = 0x3900C39Fu;
+
 // Minecraft Bedrock Android 26.30 ARM64, build-id 2dd6f453b4cfadea91a35e498a1055601a22850a.
 // ResourcePackStackPacket::_read required/server-forced style flag store.
 //   strb w8,  [x20, #0x68] -> strb wzr, [x20, #0x68]
-// The old private createPacket-like signature is intentionally not included.
 constexpr int kStackRequiredFlagPattern_26_30[] = {
     0xE8, 0x43, 0x57, 0x39,
     0x48, 0xEE, 0xFF, 0x34,
@@ -95,6 +112,10 @@ constexpr uint32_t kStackRequiredFlagStoreOriginal_26_30 = 0x3901A288u;
 constexpr uint32_t kStackRequiredFlagStoreForcedFalse_26_30 = 0x3901A29Fu;
 
 constexpr PatchSpec kPatches_26_30[] = {
+    {{kInfoRequiredFlagPattern_26_30, sizeof(kInfoRequiredFlagPattern_26_30) / sizeof(kInfoRequiredFlagPattern_26_30[0])},
+     kInfoRequiredFlagStoreOffset_26_30,
+     kInfoRequiredFlagStoreOriginal_26_30,
+     kInfoRequiredFlagStoreForcedFalse_26_30},
     {{kStackRequiredFlagPattern_26_30, sizeof(kStackRequiredFlagPattern_26_30) / sizeof(kStackRequiredFlagPattern_26_30[0])},
      kStackRequiredFlagStoreOffset_26_30,
      kStackRequiredFlagStoreOriginal_26_30,
