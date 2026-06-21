@@ -1,3 +1,4 @@
+#include <android/log.h>
 #include <elf.h>
 #include <link.h>
 #include <pthread.h>
@@ -7,24 +8,30 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 #include <vector>
-#include <algorithm>
 
 namespace {
 
+constexpr const char* kTag = "ForceServerGlobalResource";
 constexpr const char* kTargetModule = "libminecraftpe.so";
 constexpr uint32_t kStrbUnsignedMask = 0xFFC00000u;
 constexpr uint32_t kStrbUnsignedValue = 0x39000000u;
+constexpr uint32_t kStrUnsignedMask = 0xFFC00000u;
+constexpr uint32_t kStrUnsignedValue = 0xB9000000u;
 constexpr uint32_t kRegisterMask = 0x1Fu;
 
-struct BytePattern { const int* bytes = nullptr; size_t size = 0; };
-struct PatchSpec { BytePattern pattern; size_t patchOffset = 0; uint32_t expectedImmediate = 0; };
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, kTag, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, kTag, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, kTag, __VA_ARGS__)
+
+struct BytePattern { const int* bytes = nullptr; size_t size = 0; const char* name = nullptr; };
+struct PatchSpec { BytePattern pattern; size_t patchOffset = 0; uint32_t expectedImmediate = 0; const char* name = nullptr; };
 struct ExecSegment { uintptr_t start = 0; size_t size = 0; };
 struct ModuleInfo { uintptr_t base = 0; std::vector<ExecSegment> execSegments; };
 
 std::atomic<bool> g_workerStarted{false};
 
-// Legacy 26.23 packet-read layout. These are public packet read patterns only.
 constexpr int kInfoRequiredFlagPatternLegacy[] = {
     0xE8, 0x03, 0x6C, 0x39, -1, -1, -1, 0x34,
     0xE8, 0x03, 0x6B, 0x39, -1, 0xC3, 0x00, 0x39,
@@ -36,9 +43,6 @@ constexpr int kStackRequiredFlagPatternLegacy[] = {
     0x08, 0x81, 0x3D, 0x91, 0xA9, 0x03, 0x04, 0xD1,
 };
 
-// Modern 26.30/26.31 packet-read anchors. RVAs may move, so these are used as
-// anchors and the actual boolean stores are patched by decoding nearby STRB
-// instructions instead of hardcoding absolute offsets.
 constexpr int kInfoRequiredFlagPatternModern[] = {
     0xA8, 0x03, 0x54, 0x38, 0xE8, 0xC3, 0x29, 0x39,
     -1, -1, -1, 0x34, 0xA8, 0x03, 0x50, 0x38,
@@ -53,8 +57,8 @@ constexpr int kStackRequiredFlagPatternModern[] = {
 };
 
 constexpr PatchSpec kLegacyExactPatches[] = {
-    {{kInfoRequiredFlagPatternLegacy, sizeof(kInfoRequiredFlagPatternLegacy) / sizeof(kInfoRequiredFlagPatternLegacy[0])}, 12, 0x30},
-    {{kStackRequiredFlagPatternLegacy, sizeof(kStackRequiredFlagPatternLegacy) / sizeof(kStackRequiredFlagPatternLegacy[0])}, 8, 0x68},
+    {{kInfoRequiredFlagPatternLegacy, sizeof(kInfoRequiredFlagPatternLegacy) / sizeof(kInfoRequiredFlagPatternLegacy[0]), "legacy-info"}, 12, 0x30, "legacy info #0x30"},
+    {{kStackRequiredFlagPatternLegacy, sizeof(kStackRequiredFlagPatternLegacy) / sizeof(kStackRequiredFlagPatternLegacy[0]), "legacy-stack"}, 8, 0x68, "legacy stack #0x68"},
 };
 
 bool contains(const char* haystack, const char* needle) {
@@ -78,7 +82,7 @@ bool patternMatches(const uint8_t* ptr, const int* pattern, size_t patternSize) 
     return true;
 }
 
-std::vector<uintptr_t> scanSegment(const ExecSegment& seg, const int* pattern, size_t patternSize) {
+std::vector<uintptr_t> scanSegment(const ExecSegment& seg, const int* pattern, size_t patternSize, size_t maxMatches = 4) {
     std::vector<uintptr_t> matches;
     if (!seg.start || seg.size < patternSize) return matches;
     const auto* begin = reinterpret_cast<const uint8_t*>(seg.start);
@@ -86,18 +90,18 @@ std::vector<uintptr_t> scanSegment(const ExecSegment& seg, const int* pattern, s
     for (size_t i = 0; i <= limit; ++i) {
         if (patternMatches(begin + i, pattern, patternSize)) {
             matches.push_back(seg.start + i);
-            if (matches.size() > 1) break;
+            if (matches.size() >= maxMatches) break;
         }
     }
     return matches;
 }
 
-std::vector<uintptr_t> scanAllExecutableSegments(const ModuleInfo& module, const int* pattern, size_t patternSize) {
+std::vector<uintptr_t> scanAllExecutableSegments(const ModuleInfo& module, const int* pattern, size_t patternSize, size_t maxMatches = 4) {
     std::vector<uintptr_t> matches;
     for (const ExecSegment& seg : module.execSegments) {
-        std::vector<uintptr_t> local = scanSegment(seg, pattern, patternSize);
+        std::vector<uintptr_t> local = scanSegment(seg, pattern, patternSize, maxMatches - matches.size());
         matches.insert(matches.end(), local.begin(), local.end());
-        if (matches.size() > 1) break;
+        if (matches.size() >= maxMatches) break;
     }
     return matches;
 }
@@ -149,8 +153,16 @@ uint32_t getBaseRegister(uint32_t instruction) {
     return (instruction >> 5u) & 0x1Fu;
 }
 
+uint32_t getRtRegister(uint32_t instruction) {
+    return instruction & 0x1Fu;
+}
+
 bool isStrbUnsignedStore(uint32_t instruction) {
     return (instruction & kStrbUnsignedMask) == kStrbUnsignedValue;
+}
+
+bool isStrUnsignedStore(uint32_t instruction) {
+    return (instruction & kStrUnsignedMask) == kStrUnsignedValue;
 }
 
 bool isExpectedStrbStore(uint32_t instruction, uint32_t expectedImmediate) {
@@ -161,36 +173,60 @@ uint32_t forceStoreSourceRegisterToWzr(uint32_t instruction) {
     return (instruction & ~kRegisterMask) | 31u;
 }
 
-bool patchSingleInstruction(uintptr_t patchAddr, uint32_t expectedImmediate) {
+bool patchSingleInstruction(const ModuleInfo& module, uintptr_t patchAddr, uint32_t expectedImmediate, const char* label) {
+    if (!addressInExecutableSegment(module, patchAddr)) {
+        LOGW("skip %s: addr not executable rva=0x%zx", label, static_cast<size_t>(patchAddr - module.base));
+        return false;
+    }
     auto* address = reinterpret_cast<void*>(patchAddr);
     const uint32_t current = readU32(address);
-    if (!isExpectedStrbStore(current, expectedImmediate)) return false;
+    if (!isExpectedStrbStore(current, expectedImmediate)) {
+        LOGW("skip %s: not expected STRB rva=0x%zx ins=0x%08x imm=0x%x rn=x%u rt=w%u", label,
+             static_cast<size_t>(patchAddr - module.base), current, getUnsignedImmediateByteOffset(current), getBaseRegister(current), getRtRegister(current));
+        return false;
+    }
     const uint32_t patched = forceStoreSourceRegisterToWzr(current);
-    if (current == patched) return true;
-    if (!setPageProtection(address, sizeof(uint32_t), PROT_READ | PROT_WRITE | PROT_EXEC)) return false;
+    if (current == patched) {
+        LOGI("already patched %s rva=0x%zx", label, static_cast<size_t>(patchAddr - module.base));
+        return true;
+    }
+    if (!setPageProtection(address, sizeof(uint32_t), PROT_READ | PROT_WRITE | PROT_EXEC)) {
+        LOGE("mprotect RWX failed %s rva=0x%zx", label, static_cast<size_t>(patchAddr - module.base));
+        return false;
+    }
     writeU32(address, patched);
     flushInstructionCache(address, sizeof(uint32_t));
     setPageProtection(address, sizeof(uint32_t), PROT_READ | PROT_EXEC);
-    return readU32(address) == patched;
+    const bool ok = readU32(address) == patched;
+    LOGI("%s %s rva=0x%zx old=0x%08x new=0x%08x imm=0x%x rn=x%u", ok ? "patched" : "patch failed", label,
+         static_cast<size_t>(patchAddr - module.base), current, patched, expectedImmediate, getBaseRegister(current));
+    return ok;
 }
 
 bool findSingleValidatedPatchAddress(const ModuleInfo& module, const PatchSpec& spec, uintptr_t& outPatchAddr) {
-    std::vector<uintptr_t> matches = scanAllExecutableSegments(module, spec.pattern.bytes, spec.pattern.size);
+    std::vector<uintptr_t> matches = scanAllExecutableSegments(module, spec.pattern.bytes, spec.pattern.size, 4);
+    LOGI("pattern %s match count=%zu", spec.pattern.name, matches.size());
+    for (uintptr_t m : matches) LOGI("pattern %s match rva=0x%zx", spec.pattern.name, static_cast<size_t>(m - module.base));
     if (matches.size() != 1) return false;
     const uintptr_t patchAddr = matches[0] + spec.patchOffset;
     const uint32_t current = readU32(reinterpret_cast<const void*>(patchAddr));
-    if (!isExpectedStrbStore(current, spec.expectedImmediate)) return false;
+    if (!isExpectedStrbStore(current, spec.expectedImmediate)) {
+        LOGW("pattern %s target invalid rva=0x%zx ins=0x%08x", spec.pattern.name, static_cast<size_t>(patchAddr - module.base), current);
+        return false;
+    }
     outPatchAddr = patchAddr;
     return true;
 }
 
-void applyExactPatchSpecs(const ModuleInfo& module, const PatchSpec* patches, size_t count) {
+size_t applyExactPatchSpecs(const ModuleInfo& module, const PatchSpec* patches, size_t count) {
+    size_t patched = 0;
     for (size_t i = 0; i < count; ++i) {
         uintptr_t patchAddr = 0;
         if (findSingleValidatedPatchAddress(module, patches[i], patchAddr)) {
-            patchSingleInstruction(patchAddr, patches[i].expectedImmediate);
+            if (patchSingleInstruction(module, patchAddr, patches[i].expectedImmediate, patches[i].name)) ++patched;
         }
     }
+    return patched;
 }
 
 bool inList(uint32_t v, const uint32_t* list, size_t count) {
@@ -198,14 +234,16 @@ bool inList(uint32_t v, const uint32_t* list, size_t count) {
     return false;
 }
 
-void patchStrbStoresNear(const ModuleInfo& module,
-                         uintptr_t anchor,
-                         intptr_t startDelta,
-                         size_t length,
-                         uint32_t expectedBaseRegister,
-                         const uint32_t* targetOffsets,
-                         size_t targetOffsetCount) {
-    if (!anchor) return;
+size_t patchStrbStoresNear(const ModuleInfo& module,
+                           const char* group,
+                           uintptr_t anchor,
+                           intptr_t startDelta,
+                           size_t length,
+                           uint32_t expectedBaseRegister,
+                           const uint32_t* targetOffsets,
+                           size_t targetOffsetCount) {
+    if (!anchor) return 0;
+    size_t patched = 0;
     uintptr_t start = static_cast<uintptr_t>(static_cast<intptr_t>(anchor) + startDelta);
     start &= ~static_cast<uintptr_t>(3);
     for (size_t off = 0; off + sizeof(uint32_t) <= length; off += sizeof(uint32_t)) {
@@ -216,35 +254,56 @@ void patchStrbStoresNear(const ModuleInfo& module,
         if (getBaseRegister(ins) != expectedBaseRegister) continue;
         const uint32_t imm = getUnsignedImmediateByteOffset(ins);
         if (!inList(imm, targetOffsets, targetOffsetCount)) continue;
-        patchSingleInstruction(addr, imm);
+        char label[96]{};
+        snprintf(label, sizeof(label), "%s x%u#0x%x", group, expectedBaseRegister, imm);
+        if (patchSingleInstruction(module, addr, imm, label)) ++patched;
     }
+    LOGI("group %s patched count=%zu", group, patched);
+    return patched;
 }
 
-void applyModernNeighborhoodPatches(const ModuleInfo& module) {
+size_t applyModernNeighborhoodPatches(const ModuleInfo& module) {
+    size_t patched = 0;
     std::vector<uintptr_t> infoMatches = scanAllExecutableSegments(
-        module, kInfoRequiredFlagPatternModern, sizeof(kInfoRequiredFlagPatternModern) / sizeof(kInfoRequiredFlagPatternModern[0]));
+        module, kInfoRequiredFlagPatternModern, sizeof(kInfoRequiredFlagPatternModern) / sizeof(kInfoRequiredFlagPatternModern[0]), 4);
+    LOGI("pattern modern-info match count=%zu", infoMatches.size());
+    for (uintptr_t m : infoMatches) LOGI("pattern modern-info match rva=0x%zx", static_cast<size_t>(m - module.base));
     if (infoMatches.size() == 1) {
-        // ResourcePacksInfoPacket boolean flags. Newer builds use several adjacent
-        // booleans; clearing only the first one is no longer enough on some 26.31 builds.
         constexpr uint32_t kInfoOffsets[] = {0x30, 0x31, 0x32, 0x33, 0x60};
-        patchStrbStoresNear(module, infoMatches[0], 0, 0x180, 28, kInfoOffsets, sizeof(kInfoOffsets) / sizeof(kInfoOffsets[0]));
+        patched += patchStrbStoresNear(module, "modern info", infoMatches[0], 0, 0x220, 28, kInfoOffsets, sizeof(kInfoOffsets) / sizeof(kInfoOffsets[0]));
     }
 
     std::vector<uintptr_t> stackMatches = scanAllExecutableSegments(
-        module, kStackRequiredFlagPatternModern, sizeof(kStackRequiredFlagPatternModern) / sizeof(kStackRequiredFlagPatternModern[0]));
+        module, kStackRequiredFlagPatternModern, sizeof(kStackRequiredFlagPatternModern) / sizeof(kStackRequiredFlagPatternModern[0]), 4);
+    LOGI("pattern modern-stack match count=%zu", stackMatches.size());
+    for (uintptr_t m : stackMatches) LOGI("pattern modern-stack match rva=0x%zx", static_cast<size_t>(m - module.base));
     if (stackMatches.size() == 1) {
-        // ResourcePackStackPacketPayload flags around the packet-read body.
         constexpr uint32_t kStackOffsets[] = {0x54, 0x68, 0xD8, 0xD9};
-        patchStrbStoresNear(module, stackMatches[0], -0x380, 0x900, 20, kStackOffsets, sizeof(kStackOffsets) / sizeof(kStackOffsets[0]));
+        patched += patchStrbStoresNear(module, "modern stack payload", stackMatches[0], -0x420, 0x980, 20, kStackOffsets, sizeof(kStackOffsets) / sizeof(kStackOffsets[0]));
+
+        // 26.30/26.31 contain one adjacent optional-state boolean written as STRB w8, [x19,#0x40]
+        // near the same payload read. This diagnostic build patches it too so we can test whether
+        // the global-pack removal moved behind this additional packet flag. If this fixes the game,
+        // the release build can keep this one; if it breaks server packs, remove it again.
+        constexpr uint32_t kOptionalOffsets[] = {0x40};
+        patched += patchStrbStoresNear(module, "modern stack optional", stackMatches[0], -0x420, 0x980, 19, kOptionalOffsets, sizeof(kOptionalOffsets) / sizeof(kOptionalOffsets[0]));
     }
+    return patched;
 }
 
 void applyPatches(const ModuleInfo& module) {
-    applyExactPatchSpecs(module, kLegacyExactPatches, sizeof(kLegacyExactPatches) / sizeof(kLegacyExactPatches[0]));
-    applyModernNeighborhoodPatches(module);
+    LOGI("module base=%p execSegments=%zu", reinterpret_cast<void*>(module.base), module.execSegments.size());
+    for (const ExecSegment& seg : module.execSegments) {
+        LOGI("exec segment rva=0x%zx size=0x%zx", static_cast<size_t>(seg.start - module.base), seg.size);
+    }
+    size_t patched = 0;
+    patched += applyExactPatchSpecs(module, kLegacyExactPatches, sizeof(kLegacyExactPatches) / sizeof(kLegacyExactPatches[0]));
+    patched += applyModernNeighborhoodPatches(module);
+    LOGI("patch summary totalPatched=%zu", patched);
 }
 
 void* workerThread(void*) {
+    LOGI("module loaded, worker started, diagnostic build");
     for (int attempt = 0; attempt < 300; ++attempt) {
         ModuleInfo module;
         if (findTargetModule(module)) {
@@ -253,6 +312,7 @@ void* workerThread(void*) {
         }
         usleep(100000);
     }
+    LOGE("libminecraftpe.so not found after retries");
     return nullptr;
 }
 
