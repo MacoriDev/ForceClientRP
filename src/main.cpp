@@ -89,6 +89,28 @@ constexpr int kStackRequiredFlagPatternModern[] = {
     0xE0, 0x03, 0x15, 0xAA,
 };
 
+// Newer packet-read layouts also store two texture-pack-required style flags
+// later in ResourcePackStackPacket. Clearing only the early must-accept flag is
+// not enough on 26.30/26.31, because the UI/pack stack can still treat texture
+// packs as required and drop global packs. These anchors are public packet-read
+// instruction patterns, not the private MinecraftPackets::createPacket pattern.
+constexpr int kStackTextureRequiredFlagPatternModernA[] = {
+    0xE8, 0x43, 0x52, 0x39,
+    -1,   -1,   -1,   0x34,
+    0xE8, 0x43, 0x51, 0x39,
+    0x88, 0x62, 0x03, 0x39,
+    0xE8, 0x83, 0x0D, 0x91,
+    0xE0, 0x03, 0x15, 0xAA,
+};
+constexpr int kStackTextureRequiredFlagPatternModernB[] = {
+    0xE8, 0x03, 0x51, 0x39,
+    -1,   -1,   -1,   0x34,
+    0x00, 0xE4, 0x00, 0x6F,
+    0xE8, 0x03, 0x50, 0x39,
+    0x7F, 0x22, 0x00, 0xF9,
+    0x88, 0x66, 0x03, 0x39,
+};
+
 constexpr PatchSpec kLegacyPatches[] = {
     {{kInfoRequiredFlagPatternLegacy, sizeof(kInfoRequiredFlagPatternLegacy) / sizeof(kInfoRequiredFlagPatternLegacy[0])}, 12, 0x30},
     {{kStackRequiredFlagPatternLegacy, sizeof(kStackRequiredFlagPatternLegacy) / sizeof(kStackRequiredFlagPatternLegacy[0])}, 8, 0x68},
@@ -97,6 +119,8 @@ constexpr PatchSpec kLegacyPatches[] = {
 constexpr PatchSpec kModernPatches[] = {
     {{kInfoRequiredFlagPatternModern, sizeof(kInfoRequiredFlagPatternModern) / sizeof(kInfoRequiredFlagPatternModern[0])}, 20, 0x30},
     {{kStackRequiredFlagPatternModern, sizeof(kStackRequiredFlagPatternModern) / sizeof(kStackRequiredFlagPatternModern[0])}, 20, 0x68},
+    {{kStackTextureRequiredFlagPatternModernA, sizeof(kStackTextureRequiredFlagPatternModernA) / sizeof(kStackTextureRequiredFlagPatternModernA[0])}, 12, 0xD8},
+    {{kStackTextureRequiredFlagPatternModernB, sizeof(kStackTextureRequiredFlagPatternModernB) / sizeof(kStackTextureRequiredFlagPatternModernB[0])}, 20, 0xD9},
 };
 
 constexpr PatchGroup kPatchGroups[] = {
@@ -268,8 +292,10 @@ void applyPatches(const ModuleInfo& module) {
         }
     }
 
-    // Patch only when exactly one complete InfoPacket + StackPacket layout is
-    // recognized. This prevents accidental cross-version false positives.
+    // Patch only when exactly one complete packet-read layout is recognized.
+    // Modern layouts include the early must-accept flags plus the later
+    // texture-pack-required stores. This prevents accidental cross-version
+    // false positives while still surviving minor RVA shifts.
     if (applicableGroupCount == 1) {
         applyGroup(module, kPatchGroups[applicableGroupIndex]);
     }
