@@ -1,21 +1,8 @@
-cmake_minimum_required(VERSION 3.22)
-project(ForceClientRP LANGUAGES C CXX)
+cmake_minimum_required(VERSION 3.22.1)
+project(ForceServerGlobalResource LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-
-add_library(ForceClientRP SHARED
-    src/main.cpp
-)
-
-target_compile_options(ForceClientRP PRIVATE
-    -Wall
-    -Wextra
-    -Wno-unused-parameter
-    -fvisibility=hidden
-)
-
-target_link_libraries(ForceClientRP PRIVATE
-    dl
-)
+add_library(ForceServerGlobalResource SHARED src/main.cpp)
+target_compile_features(ForceServerGlobalResource PRIVATE cxx_std_20)
+target_compile_options(ForceServerGlobalResource PRIVATE -fvisibility=hidden -ffunction-sections -fdata-sections -Wall -Wextra -Wno-unused-parameter)
+target_link_libraries(ForceServerGlobalResource PRIVATE log)
+set_target_properties(ForceServerGlobalResource PROPERTIES OUTPUT_NAME "ForceServerGlobalResource")
