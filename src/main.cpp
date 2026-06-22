@@ -22,14 +22,11 @@ constexpr const char* kTargetModule = "libminecraftpe.so";
 
 struct ExecSegment { uintptr_t start = 0; size_t size = 0; };
 struct ModuleInfo { uintptr_t base = 0; std::vector<ExecSegment> execSegments; };
-struct BytePattern { const int* bytes = nullptr; size_t size = 0; const char* name = nullptr; };
 
 std::atomic<bool> g_workerStarted{false};
 
 constexpr uint32_t kStrbUnsignedMask = 0xFFC00000u;
 constexpr uint32_t kStrbUnsignedValue = 0x39000000u;
-constexpr uint32_t kLdrbUnsignedMask = 0xFFC00000u;
-constexpr uint32_t kLdrbUnsignedValue = 0x39400000u;
 
 constexpr int kInfoLegacy[] = {
     0xE8, 0x03, 0x6C, 0x39, -1, -1, -1, 0x34,
@@ -149,13 +146,9 @@ bool writeInstruction(const ModuleInfo& module, uintptr_t addr, uint32_t patched
 }
 
 uint32_t strbOffset(uint32_t ins) { return (ins >> 10u) & 0xFFFu; }
-uint32_t ldrbOffset(uint32_t ins) { return (ins >> 10u) & 0xFFFu; }
 uint32_t rn(uint32_t ins) { return (ins >> 5u) & 31u; }
-uint32_t rt(uint32_t ins) { return ins & 31u; }
 bool isStrb(uint32_t ins) { return (ins & kStrbUnsignedMask) == kStrbUnsignedValue; }
-bool isLdrb(uint32_t ins) { return (ins & kLdrbUnsignedMask) == kLdrbUnsignedValue; }
 uint32_t storeWzr(uint32_t ins) { return (ins & ~31u) | 31u; }
-uint32_t movWRegZero(uint32_t reg) { return 0x52800000u | (reg & 31u); }
 
 size_t patchStrbNear(const ModuleInfo& module, const char* label, uintptr_t anchor, intptr_t delta, size_t length, uint32_t baseReg, const uint32_t* offsets, size_t offsetCount) {
     if (!anchor) return 0;
@@ -180,7 +173,6 @@ size_t patchStrbNear(const ModuleInfo& module, const char* label, uintptr_t anch
 
 size_t patchPacketFlags(const ModuleInfo& module) {
     size_t patched = 0;
-
     auto legacyInfo = scanAll(module, kInfoLegacy, sizeof(kInfoLegacy) / sizeof(kInfoLegacy[0]), 4);
     LOGI("pattern legacy-info match count=%zu", legacyInfo.size());
     if (legacyInfo.size() == 1) {
@@ -188,7 +180,6 @@ size_t patchPacketFlags(const ModuleInfo& module) {
         uint32_t ins = readU32(reinterpret_cast<const void*>(addr));
         if (isStrb(ins) && strbOffset(ins) == 0x30 && writeInstruction(module, addr, storeWzr(ins), "legacy info #0x30")) ++patched;
     }
-
     auto legacyStack = scanAll(module, kStackLegacy, sizeof(kStackLegacy) / sizeof(kStackLegacy[0]), 4);
     LOGI("pattern legacy-stack match count=%zu", legacyStack.size());
     if (legacyStack.size() == 1) {
@@ -196,7 +187,6 @@ size_t patchPacketFlags(const ModuleInfo& module) {
         uint32_t ins = readU32(reinterpret_cast<const void*>(addr));
         if (isStrb(ins) && strbOffset(ins) == 0x68 && writeInstruction(module, addr, storeWzr(ins), "legacy stack #0x68")) ++patched;
     }
-
     auto info = scanAll(module, kInfoModern, sizeof(kInfoModern) / sizeof(kInfoModern[0]), 4);
     LOGI("pattern modern-info match count=%zu", info.size());
     for (auto m : info) LOGI("pattern modern-info match rva=0x%zx", static_cast<size_t>(m - module.base));
@@ -204,7 +194,6 @@ size_t patchPacketFlags(const ModuleInfo& module) {
         constexpr uint32_t offsets[] = {0x30, 0x31, 0x32, 0x33, 0x60};
         patched += patchStrbNear(module, "modern info", info[0], 0, 0x220, 28, offsets, sizeof(offsets) / sizeof(offsets[0]));
     }
-
     auto stack = scanAll(module, kStackModern, sizeof(kStackModern) / sizeof(kStackModern[0]), 4);
     LOGI("pattern modern-stack match count=%zu", stack.size());
     for (auto m : stack) LOGI("pattern modern-stack match rva=0x%zx", static_cast<size_t>(m - module.base));
@@ -232,7 +221,7 @@ int64_t signExtend(int64_t value, unsigned bits) {
     return (value ^ mask) - mask;
 }
 
-std::vector<uintptr_t> findAdrpAddXrefs(const ModuleInfo& module, uintptr_t target, size_t maxMatches = 8) {
+std::vector<uintptr_t> findAdrpAddXrefs(const ModuleInfo& module, uintptr_t target, size_t maxMatches = 16) {
     std::vector<uintptr_t> out;
     const uintptr_t targetPage = target & ~static_cast<uintptr_t>(0xFFF);
     for (const auto& seg : module.execSegments) {
@@ -263,44 +252,57 @@ std::vector<uintptr_t> findAdrpAddXrefs(const ModuleInfo& module, uintptr_t targ
     return out;
 }
 
-size_t patchServerRequiredSessionFlag(const ModuleInfo& module) {
-    uintptr_t str = findCString(module, "resource_pack_download_server_required");
-    if (!str) {
-        LOGI("server-required string not found");
-        return 0;
+bool looksLikeFunctionStart(uint32_t a, uint32_t b, uint32_t c) {
+    const bool subSp = (a & 0xFFC003FFu) == 0xD10003FFu;
+    const bool stpFpLrB = (b & 0xFFC07C00u) == 0xA9007C00u;
+    const bool stpFpLrC = (c & 0xFFC07C00u) == 0xA9007C00u;
+    return subSp && (stpFpLrB || stpFpLrC);
+}
+
+uintptr_t nearestFunctionStart(const ModuleInfo& module, uintptr_t at) {
+    uintptr_t limit = at > 0x400 ? at - 0x400 : module.base;
+    for (uintptr_t p = at & ~static_cast<uintptr_t>(3); p >= limit + 8; p -= 4) {
+        if (!inExecutable(module, p) || !inExecutable(module, p + 8)) continue;
+        if (looksLikeFunctionStart(readU32(reinterpret_cast<const void*>(p)), readU32(reinterpret_cast<const void*>(p + 4)), readU32(reinterpret_cast<const void*>(p + 8)))) return p;
+        if (p < 4) break;
     }
-    LOGI("server-required string rva=0x%zx", static_cast<size_t>(str - module.base));
-    auto refs = findAdrpAddXrefs(module, str, 4);
-    LOGI("server-required xref count=%zu", refs.size());
-    size_t patched = 0;
+    return 0;
+}
+
+void diagnoseStringXrefs(const ModuleInfo& module, const char* name) {
+    uintptr_t s = findCString(module, name);
+    if (!s) {
+        LOGI("active-stack diagnostic string not found: %s", name);
+        return;
+    }
+    LOGI("active-stack diagnostic string %s rva=0x%zx", name, static_cast<size_t>(s - module.base));
+    auto refs = findAdrpAddXrefs(module, s, 16);
+    LOGI("active-stack diagnostic xref %s count=%zu", name, refs.size());
     for (uintptr_t ref : refs) {
-        LOGI("server-required xref rva=0x%zx", static_cast<size_t>(ref - module.base));
-        uintptr_t start = ref > 0x120 ? ref - 0x120 : ref;
-        for (uintptr_t addr = start; addr + 4 <= ref; addr += 4) {
-            if (!inExecutable(module, addr)) continue;
-            uint32_t ins = readU32(reinterpret_cast<const void*>(addr));
-            if (!isLdrb(ins)) continue;
-            if (rn(ins) != 22 || ldrbOffset(ins) != 0x58) continue;
-            char label[96]{};
-            snprintf(label, sizeof(label), "server-required session flag x22#0x58 -> w%u=0", rt(ins));
-            if (writeInstruction(module, addr, movWRegZero(rt(ins)), label)) ++patched;
-        }
+        uintptr_t fn = nearestFunctionStart(module, ref);
+        LOGI("active-stack diagnostic xref %s adrp=0x%zx functionStart=0x%zx", name, static_cast<size_t>(ref - module.base), fn ? static_cast<size_t>(fn - module.base) : 0);
     }
-    LOGI("server-required session flag patched count=%zu", patched);
-    return patched;
+}
+
+void runActiveStackDiagnostics(const ModuleInfo& module) {
+    LOGI("V15 diagnostic: ignoring global_resource_packs.json; tracing in-memory active pack UI/stack labels only");
+    diagnoseStringXrefs(module, "activeTexturePacks");
+    diagnoseStringXrefs(module, "globalTexturePacks");
+    diagnoseStringXrefs(module, "activeBehaviorPacks");
+    diagnoseStringXrefs(module, "resourcePackStack");
+    diagnoseStringXrefs(module, "ResourcePackStack");
 }
 
 void applyPatches(const ModuleInfo& module) {
     LOGI("module base=%p execSegments=%zu", reinterpret_cast<void*>(module.base), module.execSegments.size());
     for (const auto& seg : module.execSegments) LOGI("exec segment rva=0x%zx size=0x%zx", static_cast<size_t>(seg.start - module.base), seg.size);
-    size_t total = 0;
-    total += patchPacketFlags(module);
-    total += patchServerRequiredSessionFlag(module);
+    size_t total = patchPacketFlags(module);
     LOGI("patch summary totalPatched=%zu", total);
+    runActiveStackDiagnostics(module);
 }
 
 void* workerThread(void*) {
-    LOGI("module loaded, worker started, V14 session-stack diagnostic build");
+    LOGI("module loaded, worker started, V15 active-stack diagnostic build");
     for (int attempt = 0; attempt < 300; ++attempt) {
         ModuleInfo module;
         if (findTargetModule(module)) {
