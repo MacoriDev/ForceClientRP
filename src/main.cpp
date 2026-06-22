@@ -17,6 +17,8 @@ constexpr const char* kTag = "ForceServerGlobalResource";
 constexpr const char* kTargetModule = "libminecraftpe.so";
 constexpr uint32_t kStrbUnsignedMask = 0xFFC00000u;
 constexpr uint32_t kStrbUnsignedValue = 0x39000000u;
+constexpr uint32_t kStrUnsignedMask = 0xFFC00000u;
+constexpr uint32_t kStrUnsignedValue = 0xB9000000u;
 constexpr uint32_t kRegisterMask = 0x1Fu;
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, kTag, __VA_ARGS__)
@@ -142,25 +144,32 @@ void flushInstructionCache(void* address, size_t length) {
     __builtin___clear_cache(reinterpret_cast<char*>(address), reinterpret_cast<char*>(address) + length);
 }
 
-uint32_t getUnsignedImmediateByteOffset(uint32_t instruction) { return (instruction >> 10u) & 0xFFFu; }
+uint32_t getUnsignedByteOffset(uint32_t instruction) { return (instruction >> 10u) & 0xFFFu; }
+uint32_t getUnsignedWordByteOffset(uint32_t instruction) { return ((instruction >> 10u) & 0xFFFu) * 4u; }
 uint32_t getBaseRegister(uint32_t instruction) { return (instruction >> 5u) & 0x1Fu; }
 uint32_t getRtRegister(uint32_t instruction) { return instruction & 0x1Fu; }
 bool isStrbUnsignedStore(uint32_t instruction) { return (instruction & kStrbUnsignedMask) == kStrbUnsignedValue; }
+bool isStrUnsignedStore(uint32_t instruction) { return (instruction & kStrUnsignedMask) == kStrUnsignedValue; }
 bool isExpectedStrbStore(uint32_t instruction, uint32_t expectedImmediate) {
-    return isStrbUnsignedStore(instruction) && getUnsignedImmediateByteOffset(instruction) == expectedImmediate;
+    return isStrbUnsignedStore(instruction) && getUnsignedByteOffset(instruction) == expectedImmediate;
+}
+bool isExpectedStrStore(uint32_t instruction, uint32_t expectedImmediate) {
+    return isStrUnsignedStore(instruction) && getUnsignedWordByteOffset(instruction) == expectedImmediate;
 }
 uint32_t forceStoreSourceRegisterToWzr(uint32_t instruction) { return (instruction & ~kRegisterMask) | 31u; }
 
-bool patchSingleInstruction(const ModuleInfo& module, uintptr_t patchAddr, uint32_t expectedImmediate, const char* label) {
+bool patchStoreInstruction(const ModuleInfo& module, uintptr_t patchAddr, uint32_t expectedImmediate, bool wordStore, const char* label) {
     if (!addressInExecutableSegment(module, patchAddr)) {
         LOGW("skip %s: addr not executable rva=0x%zx", label, static_cast<size_t>(patchAddr - module.base));
         return false;
     }
     auto* address = reinterpret_cast<void*>(patchAddr);
     const uint32_t current = readU32(address);
-    if (!isExpectedStrbStore(current, expectedImmediate)) {
-        LOGW("skip %s: not expected STRB rva=0x%zx ins=0x%08x imm=0x%x rn=x%u rt=w%u", label,
-             static_cast<size_t>(patchAddr - module.base), current, getUnsignedImmediateByteOffset(current), getBaseRegister(current), getRtRegister(current));
+    const bool okStore = wordStore ? isExpectedStrStore(current, expectedImmediate) : isExpectedStrbStore(current, expectedImmediate);
+    const uint32_t imm = wordStore ? getUnsignedWordByteOffset(current) : getUnsignedByteOffset(current);
+    if (!okStore) {
+        LOGW("skip %s: unexpected store rva=0x%zx ins=0x%08x imm=0x%x rn=x%u rt=w%u", label,
+             static_cast<size_t>(patchAddr - module.base), current, imm, getBaseRegister(current), getRtRegister(current));
         return false;
     }
     const uint32_t patched = forceStoreSourceRegisterToWzr(current);
@@ -201,7 +210,7 @@ size_t applyExactPatchSpecs(const ModuleInfo& module, const PatchSpec* patches, 
     for (size_t i = 0; i < count; ++i) {
         uintptr_t patchAddr = 0;
         if (findSingleValidatedPatchAddress(module, patches[i], patchAddr)) {
-            if (patchSingleInstruction(module, patchAddr, patches[i].expectedImmediate, patches[i].name)) ++patched;
+            if (patchStoreInstruction(module, patchAddr, patches[i].expectedImmediate, false, patches[i].name)) ++patched;
         }
     }
     return patched;
@@ -212,8 +221,9 @@ bool inList(uint32_t v, const uint32_t* list, size_t count) {
     return false;
 }
 
-size_t patchStrbStoresNear(const ModuleInfo& module, const char* group, uintptr_t anchor, intptr_t startDelta,
-                           size_t length, uint32_t expectedBaseRegister, const uint32_t* targetOffsets, size_t targetOffsetCount) {
+size_t patchStoresNear(const ModuleInfo& module, const char* group, uintptr_t anchor, intptr_t startDelta,
+                       size_t length, uint32_t expectedBaseRegister, const uint32_t* targetOffsets,
+                       size_t targetOffsetCount, bool wordStore) {
     if (!anchor) return 0;
     size_t patched = 0;
     uintptr_t start = static_cast<uintptr_t>(static_cast<intptr_t>(anchor) + startDelta);
@@ -222,13 +232,23 @@ size_t patchStrbStoresNear(const ModuleInfo& module, const char* group, uintptr_
         uintptr_t addr = start + off;
         if (!addressInExecutableSegment(module, addr)) continue;
         uint32_t ins = readU32(reinterpret_cast<const void*>(addr));
-        if (!isStrbUnsignedStore(ins)) continue;
-        if (getBaseRegister(ins) != expectedBaseRegister) continue;
-        const uint32_t imm = getUnsignedImmediateByteOffset(ins);
-        if (!inList(imm, targetOffsets, targetOffsetCount)) continue;
-        char label[96]{};
-        snprintf(label, sizeof(label), "%s x%u#0x%x", group, expectedBaseRegister, imm);
-        if (patchSingleInstruction(module, addr, imm, label)) ++patched;
+        if (wordStore) {
+            if (!isStrUnsignedStore(ins)) continue;
+            if (getBaseRegister(ins) != expectedBaseRegister) continue;
+            const uint32_t imm = getUnsignedWordByteOffset(ins);
+            if (!inList(imm, targetOffsets, targetOffsetCount)) continue;
+            char label[96]{};
+            snprintf(label, sizeof(label), "%s STR x%u#0x%x", group, expectedBaseRegister, imm);
+            if (patchStoreInstruction(module, addr, imm, true, label)) ++patched;
+        } else {
+            if (!isStrbUnsignedStore(ins)) continue;
+            if (getBaseRegister(ins) != expectedBaseRegister) continue;
+            const uint32_t imm = getUnsignedByteOffset(ins);
+            if (!inList(imm, targetOffsets, targetOffsetCount)) continue;
+            char label[96]{};
+            snprintf(label, sizeof(label), "%s STRB x%u#0x%x", group, expectedBaseRegister, imm);
+            if (patchStoreInstruction(module, addr, imm, false, label)) ++patched;
+        }
     }
     LOGI("group %s patched count=%zu", group, patched);
     return patched;
@@ -240,18 +260,22 @@ size_t applyModernNeighborhoodPatches(const ModuleInfo& module) {
     LOGI("pattern modern-info match count=%zu", infoMatches.size());
     for (uintptr_t m : infoMatches) LOGI("pattern modern-info match rva=0x%zx", static_cast<size_t>(m - module.base));
     if (infoMatches.size() == 1) {
-        constexpr uint32_t kInfoOffsets[] = {0x30, 0x31, 0x32, 0x33, 0x60};
-        patched += patchStrbStoresNear(module, "modern info", infoMatches[0], 0, 0x220, 28, kInfoOffsets, sizeof(kInfoOffsets) / sizeof(kInfoOffsets[0]));
+        constexpr uint32_t kInfoByteOffsets[] = {0x30, 0x31, 0x32, 0x33, 0x60};
+        patched += patchStoresNear(module, "modern info flags", infoMatches[0], 0, 0x220, 28, kInfoByteOffsets, sizeof(kInfoByteOffsets) / sizeof(kInfoByteOffsets[0]), false);
     }
 
     std::vector<uintptr_t> stackMatches = scanAllExecutableSegments(module, kStackRequiredFlagPatternModern, sizeof(kStackRequiredFlagPatternModern) / sizeof(kStackRequiredFlagPatternModern[0]), 4);
     LOGI("pattern modern-stack match count=%zu", stackMatches.size());
     for (uintptr_t m : stackMatches) LOGI("pattern modern-stack match rva=0x%zx", static_cast<size_t>(m - module.base));
     if (stackMatches.size() == 1) {
-        constexpr uint32_t kStackOffsets[] = {0x54, 0x68, 0xD8, 0xD9};
-        patched += patchStrbStoresNear(module, "modern stack payload", stackMatches[0], -0x420, 0x980, 20, kStackOffsets, sizeof(kStackOffsets) / sizeof(kStackOffsets[0]));
-        constexpr uint32_t kOptionalOffsets[] = {0x40};
-        patched += patchStrbStoresNear(module, "modern stack optional", stackMatches[0], -0x420, 0x980, 19, kOptionalOffsets, sizeof(kOptionalOffsets) / sizeof(kOptionalOffsets[0]));
+        constexpr uint32_t kStackByteOffsets[] = {0x54, 0x68, 0xD8, 0xD9};
+        patched += patchStoresNear(module, "modern stack byte flags", stackMatches[0], -0x420, 0x980, 20, kStackByteOffsets, sizeof(kStackByteOffsets) / sizeof(kStackByteOffsets[0]), false);
+
+        // V13: 26.31 still removes global packs after all packet booleans are false.
+        // The stack packet also stores 32-bit server-stack counters at these offsets.
+        // 26.30 and 26.31 have the same instructions, shifted by the minor update.
+        constexpr uint32_t kStackWordOffsets[] = {0x50, 0x64, 0x6C};
+        patched += patchStoresNear(module, "modern stack word counters", stackMatches[0], -0x700, 0xA80, 20, kStackWordOffsets, sizeof(kStackWordOffsets) / sizeof(kStackWordOffsets[0]), true);
     }
     return patched;
 }
@@ -282,7 +306,7 @@ void traceAdrpAddXrefsToAddress(const ModuleInfo& module, uintptr_t target, cons
         for (size_t off = 0; off + 32 < seg.size; off += 4) {
             const uintptr_t pc = seg.start + off;
             const uint32_t ins = readU32(reinterpret_cast<const void*>(pc));
-            if ((ins & 0x9F000000u) != 0x90000000u) continue; // ADRP
+            if ((ins & 0x9F000000u) != 0x90000000u) continue;
             const uint32_t reg = ins & 31u;
             int64_t imm = static_cast<int64_t>(((ins >> 5u) & 0x7FFFFu) << 2u | ((ins >> 29u) & 3u));
             imm = signExtend(imm, 21);
@@ -291,7 +315,7 @@ void traceAdrpAddXrefsToAddress(const ModuleInfo& module, uintptr_t target, cons
             for (int look = 1; look <= 7; ++look) {
                 const uintptr_t pc2 = pc + static_cast<uintptr_t>(look * 4);
                 const uint32_t add = readU32(reinterpret_cast<const void*>(pc2));
-                if ((add & 0xFFC00000u) != 0x91000000u) continue; // ADD immediate, 64-bit
+                if ((add & 0xFFC00000u) != 0x91000000u) continue;
                 if (((add >> 5u) & 31u) != reg) continue;
                 const uint32_t imm12 = (add >> 10u) & 0xFFFu;
                 const uint32_t shift = (add >> 22u) & 3u;
@@ -310,15 +334,12 @@ void traceAdrpAddXrefsToAddress(const ModuleInfo& module, uintptr_t target, cons
 }
 
 void runGlobalPackDiagnostics(const ModuleInfo& module) {
-    LOGI("V12 diagnostic: packet flags patched, now tracing global-pack related static xrefs");
+    LOGI("V13 diagnostic: packet flags + stack counters patched, static xrefs follow");
     constexpr const char* kNeedles[] = {
         "global_resource_packs.json",
-        "world_resource_packs.json",
-        "ResourcePackManager::_doStackOperation",
         "activeTexturePacks",
         "resource_pack_download_server_required",
         "progressScreen.dialog.message.resourcePack.serverRequired",
-        "Server required resource pack packIdVersions:",
     };
     for (const char* needle : kNeedles) {
         const uintptr_t addr = findCStringInExecutableSegments(module, needle);
@@ -344,7 +365,7 @@ void applyPatches(const ModuleInfo& module) {
 }
 
 void* workerThread(void*) {
-    LOGI("module loaded, worker started, V12 diagnostic build");
+    LOGI("module loaded, worker started, V13 diagnostic build");
     for (int attempt = 0; attempt < 300; ++attempt) {
         ModuleInfo module;
         if (findTargetModule(module)) {
