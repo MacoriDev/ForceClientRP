@@ -17,8 +17,6 @@ constexpr const char* kTag = "ForceServerGlobalResource";
 constexpr const char* kTargetModule = "libminecraftpe.so";
 constexpr uint32_t kStrbUnsignedMask = 0xFFC00000u;
 constexpr uint32_t kStrbUnsignedValue = 0x39000000u;
-constexpr uint32_t kStrUnsignedMask = 0xFFC00000u;
-constexpr uint32_t kStrUnsignedValue = 0xB9000000u;
 constexpr uint32_t kRegisterMask = 0x1Fu;
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, kTag, __VA_ARGS__)
@@ -42,7 +40,6 @@ constexpr int kStackRequiredFlagPatternLegacy[] = {
     -1, 0xA2, 0x01, 0x39, 0xA8, 0xE9, 0x02, 0xD0,
     0x08, 0x81, 0x3D, 0x91, 0xA9, 0x03, 0x04, 0xD1,
 };
-
 constexpr int kInfoRequiredFlagPatternModern[] = {
     0xA8, 0x03, 0x54, 0x38, 0xE8, 0xC3, 0x29, 0x39,
     -1, -1, -1, 0x34, 0xA8, 0x03, 0x50, 0x38,
@@ -145,33 +142,14 @@ void flushInstructionCache(void* address, size_t length) {
     __builtin___clear_cache(reinterpret_cast<char*>(address), reinterpret_cast<char*>(address) + length);
 }
 
-uint32_t getUnsignedImmediateByteOffset(uint32_t instruction) {
-    return (instruction >> 10u) & 0xFFFu;
-}
-
-uint32_t getBaseRegister(uint32_t instruction) {
-    return (instruction >> 5u) & 0x1Fu;
-}
-
-uint32_t getRtRegister(uint32_t instruction) {
-    return instruction & 0x1Fu;
-}
-
-bool isStrbUnsignedStore(uint32_t instruction) {
-    return (instruction & kStrbUnsignedMask) == kStrbUnsignedValue;
-}
-
-bool isStrUnsignedStore(uint32_t instruction) {
-    return (instruction & kStrUnsignedMask) == kStrUnsignedValue;
-}
-
+uint32_t getUnsignedImmediateByteOffset(uint32_t instruction) { return (instruction >> 10u) & 0xFFFu; }
+uint32_t getBaseRegister(uint32_t instruction) { return (instruction >> 5u) & 0x1Fu; }
+uint32_t getRtRegister(uint32_t instruction) { return instruction & 0x1Fu; }
+bool isStrbUnsignedStore(uint32_t instruction) { return (instruction & kStrbUnsignedMask) == kStrbUnsignedValue; }
 bool isExpectedStrbStore(uint32_t instruction, uint32_t expectedImmediate) {
     return isStrbUnsignedStore(instruction) && getUnsignedImmediateByteOffset(instruction) == expectedImmediate;
 }
-
-uint32_t forceStoreSourceRegisterToWzr(uint32_t instruction) {
-    return (instruction & ~kRegisterMask) | 31u;
-}
+uint32_t forceStoreSourceRegisterToWzr(uint32_t instruction) { return (instruction & ~kRegisterMask) | 31u; }
 
 bool patchSingleInstruction(const ModuleInfo& module, uintptr_t patchAddr, uint32_t expectedImmediate, const char* label) {
     if (!addressInExecutableSegment(module, patchAddr)) {
@@ -234,14 +212,8 @@ bool inList(uint32_t v, const uint32_t* list, size_t count) {
     return false;
 }
 
-size_t patchStrbStoresNear(const ModuleInfo& module,
-                           const char* group,
-                           uintptr_t anchor,
-                           intptr_t startDelta,
-                           size_t length,
-                           uint32_t expectedBaseRegister,
-                           const uint32_t* targetOffsets,
-                           size_t targetOffsetCount) {
+size_t patchStrbStoresNear(const ModuleInfo& module, const char* group, uintptr_t anchor, intptr_t startDelta,
+                           size_t length, uint32_t expectedBaseRegister, const uint32_t* targetOffsets, size_t targetOffsetCount) {
     if (!anchor) return 0;
     size_t patched = 0;
     uintptr_t start = static_cast<uintptr_t>(static_cast<intptr_t>(anchor) + startDelta);
@@ -264,8 +236,7 @@ size_t patchStrbStoresNear(const ModuleInfo& module,
 
 size_t applyModernNeighborhoodPatches(const ModuleInfo& module) {
     size_t patched = 0;
-    std::vector<uintptr_t> infoMatches = scanAllExecutableSegments(
-        module, kInfoRequiredFlagPatternModern, sizeof(kInfoRequiredFlagPatternModern) / sizeof(kInfoRequiredFlagPatternModern[0]), 4);
+    std::vector<uintptr_t> infoMatches = scanAllExecutableSegments(module, kInfoRequiredFlagPatternModern, sizeof(kInfoRequiredFlagPatternModern) / sizeof(kInfoRequiredFlagPatternModern[0]), 4);
     LOGI("pattern modern-info match count=%zu", infoMatches.size());
     for (uintptr_t m : infoMatches) LOGI("pattern modern-info match rva=0x%zx", static_cast<size_t>(m - module.base));
     if (infoMatches.size() == 1) {
@@ -273,22 +244,91 @@ size_t applyModernNeighborhoodPatches(const ModuleInfo& module) {
         patched += patchStrbStoresNear(module, "modern info", infoMatches[0], 0, 0x220, 28, kInfoOffsets, sizeof(kInfoOffsets) / sizeof(kInfoOffsets[0]));
     }
 
-    std::vector<uintptr_t> stackMatches = scanAllExecutableSegments(
-        module, kStackRequiredFlagPatternModern, sizeof(kStackRequiredFlagPatternModern) / sizeof(kStackRequiredFlagPatternModern[0]), 4);
+    std::vector<uintptr_t> stackMatches = scanAllExecutableSegments(module, kStackRequiredFlagPatternModern, sizeof(kStackRequiredFlagPatternModern) / sizeof(kStackRequiredFlagPatternModern[0]), 4);
     LOGI("pattern modern-stack match count=%zu", stackMatches.size());
     for (uintptr_t m : stackMatches) LOGI("pattern modern-stack match rva=0x%zx", static_cast<size_t>(m - module.base));
     if (stackMatches.size() == 1) {
         constexpr uint32_t kStackOffsets[] = {0x54, 0x68, 0xD8, 0xD9};
         patched += patchStrbStoresNear(module, "modern stack payload", stackMatches[0], -0x420, 0x980, 20, kStackOffsets, sizeof(kStackOffsets) / sizeof(kStackOffsets[0]));
-
-        // 26.30/26.31 contain one adjacent optional-state boolean written as STRB w8, [x19,#0x40]
-        // near the same payload read. This diagnostic build patches it too so we can test whether
-        // the global-pack removal moved behind this additional packet flag. If this fixes the game,
-        // the release build can keep this one; if it breaks server packs, remove it again.
         constexpr uint32_t kOptionalOffsets[] = {0x40};
         patched += patchStrbStoresNear(module, "modern stack optional", stackMatches[0], -0x420, 0x980, 19, kOptionalOffsets, sizeof(kOptionalOffsets) / sizeof(kOptionalOffsets[0]));
     }
     return patched;
+}
+
+uintptr_t findCStringInExecutableSegments(const ModuleInfo& module, const char* needle) {
+    const size_t n = std::strlen(needle);
+    if (n == 0) return 0;
+    for (const ExecSegment& seg : module.execSegments) {
+        if (seg.size < n + 1) continue;
+        const auto* begin = reinterpret_cast<const uint8_t*>(seg.start);
+        for (size_t i = 0; i + n < seg.size; ++i) {
+            if (begin[i + n] == 0 && std::memcmp(begin + i, needle, n) == 0) return seg.start + i;
+        }
+    }
+    return 0;
+}
+
+int64_t signExtend(int64_t value, unsigned bits) {
+    const int64_t mask = 1LL << (bits - 1);
+    return (value ^ mask) - mask;
+}
+
+void traceAdrpAddXrefsToAddress(const ModuleInfo& module, uintptr_t target, const char* label) {
+    if (!target) return;
+    const uintptr_t targetPage = target & ~static_cast<uintptr_t>(0xFFF);
+    size_t count = 0;
+    for (const ExecSegment& seg : module.execSegments) {
+        for (size_t off = 0; off + 32 < seg.size; off += 4) {
+            const uintptr_t pc = seg.start + off;
+            const uint32_t ins = readU32(reinterpret_cast<const void*>(pc));
+            if ((ins & 0x9F000000u) != 0x90000000u) continue; // ADRP
+            const uint32_t reg = ins & 31u;
+            int64_t imm = static_cast<int64_t>(((ins >> 5u) & 0x7FFFFu) << 2u | ((ins >> 29u) & 3u));
+            imm = signExtend(imm, 21);
+            const uintptr_t page = (pc & ~static_cast<uintptr_t>(0xFFF)) + static_cast<intptr_t>(imm << 12);
+            if (page != targetPage) continue;
+            for (int look = 1; look <= 7; ++look) {
+                const uintptr_t pc2 = pc + static_cast<uintptr_t>(look * 4);
+                const uint32_t add = readU32(reinterpret_cast<const void*>(pc2));
+                if ((add & 0xFFC00000u) != 0x91000000u) continue; // ADD immediate, 64-bit
+                if (((add >> 5u) & 31u) != reg) continue;
+                const uint32_t imm12 = (add >> 10u) & 0xFFFu;
+                const uint32_t shift = (add >> 22u) & 3u;
+                const uintptr_t addr = page + (static_cast<uintptr_t>(imm12) << (shift ? 12 : 0));
+                if (addr == target) {
+                    LOGI("diagnostic xref %s adrp=0x%zx add=0x%zx reg=x%u", label, static_cast<size_t>(pc - module.base), static_cast<size_t>(pc2 - module.base), reg);
+                    if (++count >= 12) {
+                        LOGI("diagnostic xref %s stopped at 12 matches", label);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    LOGI("diagnostic xref %s count=%zu", label, count);
+}
+
+void runGlobalPackDiagnostics(const ModuleInfo& module) {
+    LOGI("V12 diagnostic: packet flags patched, now tracing global-pack related static xrefs");
+    constexpr const char* kNeedles[] = {
+        "global_resource_packs.json",
+        "world_resource_packs.json",
+        "ResourcePackManager::_doStackOperation",
+        "activeTexturePacks",
+        "resource_pack_download_server_required",
+        "progressScreen.dialog.message.resourcePack.serverRequired",
+        "Server required resource pack packIdVersions:",
+    };
+    for (const char* needle : kNeedles) {
+        const uintptr_t addr = findCStringInExecutableSegments(module, needle);
+        if (!addr) {
+            LOGI("diagnostic string not found: %s", needle);
+            continue;
+        }
+        LOGI("diagnostic string %s rva=0x%zx", needle, static_cast<size_t>(addr - module.base));
+        traceAdrpAddXrefsToAddress(module, addr, needle);
+    }
 }
 
 void applyPatches(const ModuleInfo& module) {
@@ -300,10 +340,11 @@ void applyPatches(const ModuleInfo& module) {
     patched += applyExactPatchSpecs(module, kLegacyExactPatches, sizeof(kLegacyExactPatches) / sizeof(kLegacyExactPatches[0]));
     patched += applyModernNeighborhoodPatches(module);
     LOGI("patch summary totalPatched=%zu", patched);
+    runGlobalPackDiagnostics(module);
 }
 
 void* workerThread(void*) {
-    LOGI("module loaded, worker started, diagnostic build");
+    LOGI("module loaded, worker started, V12 diagnostic build");
     for (int attempt = 0; attempt < 300; ++attempt) {
         ModuleInfo module;
         if (findTargetModule(module)) {
