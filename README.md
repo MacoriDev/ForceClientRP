@@ -1,4 +1,4 @@
-# ForceServerGlobalResource V13 Diagnostic
+# ForceServerGlobalResource V14 Diagnostic
 
 GPL-3.0-only.
 
@@ -17,23 +17,23 @@ adb logcat -v time -s ForceServerGlobalResource
 Current status:
 
 - V11/V12 confirmed that ResourcePacksInfoPacket and ResourcePackStackPacket boolean stores are patched on 26.31.
-- 26.30 worked with the packet-flag approach, but 26.31 still removes global resource packs after those booleans are forced false.
-- Comparing 26.30 and 26.31 showed the packet read functions are almost identical and shifted, so V13 now also patches ResourcePackStackPacket 32-bit server-stack counters.
+- V13 counter patching did not fix 26.31, so V14 stops patching StackPacket counters.
+- The global resource pack JSON file is not changed by joining a server, so V14 ignores file persistence and targets the in-memory server-required session path instead.
 
-V13 additions:
+V14 additions:
 
-- Keeps the InfoPacket boolean patches.
-- Keeps the StackPacket boolean patches.
-- Stops patching the StackPacket return/status object field at `x19 + 0x40` because it is not a packet field.
-- Adds StackPacket word-counter patches at `x20 + 0x50`, `x20 + 0x64`, and `x20 + 0x6c`.
-- Keeps static xref diagnostics for global-pack/resource-pack strings.
+- Keeps InfoPacket boolean patches.
+- Keeps StackPacket boolean patches.
+- Removes V13 StackPacket word-counter patches.
+- Adds a patch near the `resource_pack_download_server_required` string xref.
+- The new patch forces the in-memory server-required session flag load `ldrb w?, [x22, #0x58]` to zero by replacing it with `mov w?, #0`.
 
 Expected new log lines:
 
 ```text
-patched modern stack word counters STR x20#0x50 ...
-patched modern stack word counters STR x20#0x64 ...
-patched modern stack word counters STR x20#0x6c ...
+server-required string rva=...
+server-required xref count=1
+patched server-required session flag x22#0x58 -> w9=0 ...
 ```
 
-This is not a no-log public release build yet.
+This is still a diagnostic build, not a no-log public release.
