@@ -1,4 +1,4 @@
-# ForceServerGlobalResource V14 Diagnostic
+# ForceServerGlobalResource V15 Diagnostic
 
 GPL-3.0-only.
 
@@ -16,24 +16,24 @@ adb logcat -v time -s ForceServerGlobalResource
 
 Current status:
 
-- V11/V12 confirmed that ResourcePacksInfoPacket and ResourcePackStackPacket boolean stores are patched on 26.31.
-- V13 counter patching did not fix 26.31, so V14 stops patching StackPacket counters.
-- The global resource pack JSON file is not changed by joining a server, so V14 ignores file persistence and targets the in-memory server-required session path instead.
+- Resource pack JSON files are not modified when joining a server, so V15 ignores `global_resource_packs.json` and persistence paths.
+- V11/V12 confirmed that packet boolean patches are applied on 26.31.
+- V13 stack counters did not fix 26.31, so those are removed.
+- V14 server-required UI/session flag did not fix 26.31, so that patch is removed.
 
-V14 additions:
+V15 focus:
 
-- Keeps InfoPacket boolean patches.
-- Keeps StackPacket boolean patches.
-- Removes V13 StackPacket word-counter patches.
-- Adds a patch near the `resource_pack_download_server_required` string xref.
-- The new patch forces the in-memory server-required session flag load `ldrb w?, [x22, #0x58]` to zero by replacing it with `mov w?, #0`.
+- Keeps only the known packet boolean patches.
+- Adds diagnostics for in-memory active pack labels: `activeTexturePacks`, `globalTexturePacks`, `activeBehaviorPacks`, `resourcePackStack`, and `ResourcePackStack`.
+- Logs each string xref and nearest detected function start so the next build can target the actual active stack replacement function instead of file/packet/UI paths.
 
-Expected new log lines:
+Expected diagnostic lines:
 
 ```text
-server-required string rva=...
-server-required xref count=1
-patched server-required session flag x22#0x58 -> w9=0 ...
+V15 diagnostic: ignoring global_resource_packs.json
+active-stack diagnostic string activeTexturePacks rva=...
+active-stack diagnostic xref activeTexturePacks count=...
+active-stack diagnostic xref activeTexturePacks adrp=... functionStart=...
 ```
 
-This is still a diagnostic build, not a no-log public release.
+This is a diagnostic build, not a no-log public release.
